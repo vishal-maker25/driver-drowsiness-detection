@@ -1,0 +1,189 @@
+"""
+camera_stream.py - Webcam Setup and Real-Time Video Capture
+Member 1: Camera & Video Processing Module
+
+Responsibilities:
+- Set up the webcam and real-time video capture
+- Frame rate (FPS) calculation and optimization
+- Handle camera errors (disconnections, dropped frames, failure to open)
+- Threaded video capture for low latency
+"""
+
+import os
+import cv2
+import time
+import threading
+from typing import Optional, Tuple
+
+os.environ["OPENCV_LOG_LEVEL"] = "FATAL"
+os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
+
+
+class CameraStream:
+    """
+    Manages live camera capture, frame buffering, FPS calculation,
+    and error handling. Supports both standard and threaded capture modes.
+    """
+
+    def __init__(
+        self,
+        camera_index: int = 0,
+        width: int = 640,
+        height: int = 480,
+        target_fps: int = 30,
+        threaded: bool = True,
+    ):
+        """
+        Initialize the camera stream.
+
+        :param camera_index: Hardware index for the camera (default is 0).
+        :param width: Target frame width.
+        :param height: Target frame height.
+        :param target_fps: Desired capture frame rate.
+        :param threaded: If True, uses a background thread to grab frames asynchronously.
+        """
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.target_fps = target_fps
+        self.threaded = threaded
+
+        self.cap: Optional[cv2.VideoCapture] = None
+        self.is_running = False
+
+        # Threading state
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._latest_frame = None
+        self._has_new_frame = False
+
+        # FPS calculation variables
+        self._prev_time = time.time()
+        self._fps_history = []
+        self._current_fps = 0.0
+        self.frame_count = 0
+        self.consecutive_error_count = 0
+        self.max_allowed_errors = 10
+
+    def start(self) -> bool:
+        """
+        Open the camera device and start background capture if threading is enabled.
+        :return: True if successfully started, False otherwise.
+        """
+        print(f"[CameraStream] Initializing camera index {self.camera_index}...")
+
+        # Attempt default backend first, fallback to DSHOW if needed
+        self.cap = cv2.VideoCapture(self.camera_index)
+        if not self.cap or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+
+        if not self.cap.isOpened():
+            print(f"[CameraStream] ERROR: Unable to access camera at index {self.camera_index}.")
+            return False
+
+        # Set camera dimensions & target FPS
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+
+        # Retrieve actual applied dimensions
+        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        print(f"[CameraStream] Camera started successfully: {actual_w}x{actual_h} @ {actual_fps:.1f} FPS reported.")
+
+        self.is_running = True
+        self._prev_time = time.time()
+
+        if self.threaded:
+            self._thread = threading.Thread(target=self._capture_worker, daemon=True)
+            self._thread.start()
+            print("[CameraStream] Threaded capture loop started.")
+
+        return True
+
+    def _capture_worker(self):
+        """Worker thread to continuously grab frames to avoid camera buffer lag."""
+        while self.is_running:
+            if self.cap is None or not self.cap.isOpened():
+                time.sleep(0.01)
+                continue
+
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                self.consecutive_error_count += 1
+                if self.consecutive_error_count >= self.max_allowed_errors:
+                    print("[CameraStream] WARNING: High frame read errors in capture thread.")
+                time.sleep(0.01)
+                continue
+
+            self.consecutive_error_count = 0
+            with self._lock:
+                self._latest_frame = frame
+                self._has_new_frame = True
+
+    def read(self) -> Tuple[bool, Optional[any]]:
+        """
+        Read the most recent frame from the camera.
+
+        :return: Tuple (success: bool, frame: np.ndarray or None)
+        """
+        if not self.is_running or self.cap is None or not self.cap.isOpened():
+            return False, None
+
+        frame = None
+        if self.threaded:
+            with self._lock:
+                if self._latest_frame is not None:
+                    frame = self._latest_frame.copy()
+            if frame is None:
+                return False, None
+            ret = True
+        else:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                self.consecutive_error_count += 1
+                print(f"[CameraStream] WARNING: Failed to read frame ({self.consecutive_error_count}/{self.max_allowed_errors})")
+                return False, None
+            self.consecutive_error_count = 0
+
+        # Update FPS calculation
+        self._update_fps()
+        self.frame_count += 1
+        return True, frame
+
+    def _update_fps(self):
+        """Calculate real-time frames per second (FPS) with a rolling average."""
+        curr_time = time.time()
+        delta = curr_time - self._prev_time
+        self._prev_time = curr_time
+
+        if delta > 0:
+            instant_fps = 1.0 / delta
+            self._fps_history.append(instant_fps)
+            if len(self._fps_history) > 20:
+                self._fps_history.pop(0)
+            self._current_fps = sum(self._fps_history) / len(self._fps_history)
+
+    def get_fps(self) -> float:
+        """Return the current smoothed FPS."""
+        return self._current_fps
+
+    def stop(self):
+        """Release camera resources and stop capture threads."""
+        print("[CameraStream] Stopping camera stream...")
+        self.is_running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        print("[CameraStream] Camera stream closed.")
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
