@@ -1,1 +1,12 @@
-
+driver-drowsiness-detection/
+│
+├── module1_camera/
+│   ├── __init__.py            # Clean exports (CameraStream, FaceDetector)
+│   ├── camera_stream.py       # Webcam capture, FPS calculations, error handling
+│   └── face_detector.py       # OpenCV face detection & visual annotations
+│
+├── main.py                    # Live interactive demo application
+├── test_camera.py             # Diagnostic hardware scanner script
+├── requirements.txt           # opencv-python, numpy
+├── .gitignore                 # Excludes cache, logs, virtualenvs
+└── README.md                  # Comprehensive exhibition report & documentation
