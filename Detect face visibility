@@ -1,1 +1,223 @@
+"""
+face_detector.py - Real-Time Face Visibility Detection
+Member 1: Camera & Video Processing Module
+
+Responsibilities:
+- Use OpenCV to process video frames (grayscale conversion, lighting normalization)
+- Detect whether a face is visible
+- Isolate the primary driver face (largest face bounding box)
+- Provide visual annotations and status overlays for demo / debugging
+- Provide clean API for Module 2 (Eye Landmark Detection) and Module 6 (Integration)
+"""
+
+import cv2
+import numpy as np
+from typing import List, Tuple, Optional, Dict, Any
+
+
+class FaceDetector:
+    """
+    Detects faces in video frames using OpenCV's Haar Feature-based Cascade Classifier.
+    Includes contrast enhancement for variable in-car lighting.
+    """
+
+    def __init__(
+        self,
+        scale_factor: float = 1.1,
+        min_neighbors: int = 5,
+        min_face_size: Tuple[int, int] = (80, 80),
+    ):
+        """
+        Initialize the Face Detector.
+
+        :param scale_factor: Parameter specifying how much the image size is reduced at each scale.
+        :param min_neighbors: Parameter specifying how many neighbors each candidate rectangle should have to retain it.
+        :param min_face_size: Minimum possible face size (width, height) to filter out background noise.
+        """
+        self.scale_factor = scale_factor
+        self.min_neighbors = min_neighbors
+        self.min_face_size = min_face_size
+
+        # Load standard Haar Cascade frontal face model from OpenCV's data path
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        self.face_cascade = cv2.CascadeClassifier(cascade_path)
+
+        if self.face_cascade.empty():
+            raise RuntimeError(f"[FaceDetector] Failed to load cascade classifier from {cascade_path}")
+
+        print("[FaceDetector] Haar Cascade Face Detector initialized successfully.")
+
+    def detect(self, frame: np.ndarray) -> Dict[str, Any]:
+        """
+        Process a video frame and detect visible faces.
+
+        :param frame: Standard BGR image from OpenCV.
+        :return: Dictionary containing:
+            - 'is_face_visible' (bool): True if at least one valid face is detected
+            - 'faces' (List[Tuple[int, int, int, int]]): List of [x, y, w, h] boxes
+            - 'primary_face' (Optional[Tuple[int, int, int, int]]): The primary (largest) driver face box
+            - 'face_count' (int): Total count of detected faces
+        """
+        if frame is None or frame.size == 0:
+            return {
+                "is_face_visible": False,
+                "faces": [],
+                "primary_face": None,
+                "face_count": 0,
+            }
+
+        # Convert to grayscale for fast and effective cascade detection
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Apply histogram equalization to normalize lighting (useful for car environments)
+        gray_eq = cv2.equalizeHist(gray)
+
+        # Detect faces
+        detected_rects = self.face_cascade.detectMultiScale(
+            gray_eq,
+            scaleFactor=self.scale_factor,
+            minNeighbors=self.min_neighbors,
+            minSize=self.min_face_size,
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+
+        faces = [tuple(rect) for rect in detected_rects]
+        is_visible = len(faces) > 0
+        primary_face = None
+
+        if is_visible:
+            # Pick the largest face by area (w * h) as the driver's face
+            primary_face = max(faces, key=lambda f: f[2] * f[3])
+
+        return {
+            "is_face_visible": is_visible,
+            "faces": faces,
+            "primary_face": primary_face,
+            "face_count": len(faces),
+        }
+
+    def draw_annotations(
+        self,
+        frame: np.ndarray,
+        detection_result: Dict[str, Any],
+        fps: float = 0.0,
+        show_fps: bool = True,
+    ) -> np.ndarray:
+        """
+        Draw visual overlays on the frame:
+        - Bounding box and corner accents around the driver's face
+        - Header status bar (FACE DETECTED vs NO FACE DETECTED)
+        - FPS and diagnostics badge
+
+        :param frame: Input BGR frame.
+        :param detection_result: Output from detect().
+        :param fps: Current FPS to display.
+        :param show_fps: Whether to render the FPS counter.
+        :return: Annotated frame.
+        """
+        annotated = frame.copy()
+        height, width = annotated.shape[:2]
+
+        is_visible = detection_result.get("is_face_visible", False)
+        primary_face = detection_result.get("primary_face")
+        faces = detection_result.get("faces", [])
+
+        # 1. Draw Bounding Boxes around detected faces
+        for face in faces:
+            x, y, w, h = face
+            is_primary = (face == primary_face)
+
+            # Highlight primary driver face in vibrant Green/Cyan, secondary in Gray
+            color = (0, 255, 128) if is_primary else (180, 180, 180)
+            thickness = 2 if is_primary else 1
+
+            # Draw rectangle
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), color, thickness)
+
+            if is_primary:
+                # Add stylish corner brackets
+                corner_len = min(20, w // 4, h // 4)
+                bracket_thickness = 3
+                # Top-left
+                cv2.line(annotated, (x, y), (x + corner_len, y), color, bracket_thickness)
+                cv2.line(annotated, (x, y), (x, y + corner_len), color, bracket_thickness)
+                # Top-right
+                cv2.line(annotated, (x + w, y), (x + w - corner_len, y), color, bracket_thickness)
+                cv2.line(annotated, (x + w, y), (x + w, y + corner_len), color, bracket_thickness)
+                # Bottom-left
+                cv2.line(annotated, (x, y + h), (x + corner_len, y + h), color, bracket_thickness)
+                cv2.line(annotated, (x, y + h), (x, y + h - corner_len), color, bracket_thickness)
+                # Bottom-right
+                cv2.line(annotated, (x + w, y + h), (x + w - corner_len, y + h), color, bracket_thickness)
+                cv2.line(annotated, (x + w, y + h), (x + w, y + h - corner_len), color, bracket_thickness)
+
+                # Label tag
+                label = f"Driver Face ({w}x{h})"
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x, max(20, y - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+        # 2. Draw Top Status Banner
+        # Background bar
+        bar_height = 42
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (width, bar_height), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.75, annotated, 0.25, 0, annotated)
+
+        # Status text & color
+        if is_visible:
+            status_text = "DRIVER STATUS: FACE DETECTED"
+            status_color = (0, 255, 120)  # Green
+        else:
+            status_text = "DRIVER STATUS: NO FACE DETECTED"
+            status_color = (0, 70, 255)  # Orange-Red warning
+
+        # Draw status badge
+        cv2.putText(
+            annotated,
+            status_text,
+            (16, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            status_color,
+            2,
+            cv2.LINE_AA,
+        )
+
+        # 3. Draw FPS and diagnostic overlay (Top-right)
+        if show_fps:
+            fps_text = f"FPS: {fps:.1f}"
+            (tw, _), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.putText(
+                annotated,
+                fps_text,
+                (width - tw - 16, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        # 4. Bottom footer instructions
+        footer_text = "Module 1: Camera & Video Processing | Press 'q' to Quit | 's' for Snapshot"
+        cv2.putText(
+            annotated,
+            footer_text,
+            (16, height - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (200, 200, 200),
+            1,
+            cv2.LINE_AA,
+        )
+
+        return annotated
 
